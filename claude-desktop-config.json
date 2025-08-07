@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "claude-memory": {
+      "command": "node",
+      "args": ["/Users/mgibbins/code/claude/claude-memory-server/dist/index.js"],
+      "env": {}
+    }
+  }
+}
