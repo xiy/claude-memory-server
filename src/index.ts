@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema, 
   Tool 
 } from '@modelcontextprotocol/sdk/types.js';
-import { MemoryService, MEMORY_CATEGORIES } from './memory-service.js';
+import { MemoryService, MEMORY_CATEGORIES, MemoryServiceConfig } from './memory-service.js';
 
 class MemoryServer {
   private server: Server;
@@ -26,7 +26,13 @@ class MemoryServer {
       }
     );
 
-    this.memoryService = new MemoryService();
+    // Initialize memory service with embeddings enabled
+    const config: MemoryServiceConfig = {
+      enableEmbeddings: true,
+      ollamaHost: process.env.OLLAMA_HOST || 'http://localhost:11434'
+    };
+    
+    this.memoryService = new MemoryService(config);
     this.setupTools();
     this.setupErrorHandling();
   }
@@ -180,6 +186,114 @@ class MemoryServer {
           {
             name: 'get_memory_stats',
             description: 'Get statistics about stored memories including categories and counts',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false
+            }
+          } as Tool,
+          {
+            name: 'semantic_search_memory',
+            description: 'Search memories using semantic similarity (requires Ollama)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: {
+                  type: 'string',
+                  description: 'Search query for semantic similarity matching'
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of results (default 5)',
+                  minimum: 1,
+                  maximum: 20
+                },
+                min_similarity: {
+                  type: 'number',
+                  description: 'Minimum similarity score (0.0-1.0, default 0.7)',
+                  minimum: 0,
+                  maximum: 1
+                },
+                category: {
+                  type: 'string',
+                  description: 'Optional category filter',
+                  enum: Object.values(MEMORY_CATEGORIES)
+                }
+              },
+              required: ['query']
+            }
+          } as Tool,
+          {
+            name: 'hybrid_search_memory',
+            description: 'Search memories using both text and semantic similarity',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: {
+                  type: 'string',
+                  description: 'Search query for hybrid text+semantic matching'
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of results (default 10)',
+                  minimum: 1,
+                  maximum: 50
+                },
+                category: {
+                  type: 'string',
+                  description: 'Optional category filter',
+                  enum: Object.values(MEMORY_CATEGORIES)
+                },
+                text_weight: {
+                  type: 'number',
+                  description: 'Weight for text search (default 0.3)',
+                  minimum: 0,
+                  maximum: 1
+                },
+                semantic_weight: {
+                  type: 'number',
+                  description: 'Weight for semantic search (default 0.7)',
+                  minimum: 0,
+                  maximum: 1
+                }
+              },
+              required: ['query']
+            }
+          } as Tool,
+          {
+            name: 'find_similar_memories',
+            description: 'Find memories similar to a specific memory',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                memory_id: {
+                  type: 'string',
+                  description: 'ID of the memory to find similar ones for'
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of results (default 5)',
+                  minimum: 1,
+                  maximum: 20
+                },
+                min_similarity: {
+                  type: 'number',
+                  description: 'Minimum similarity score (default 0.7)',
+                  minimum: 0,
+                  maximum: 1
+                },
+                category: {
+                  type: 'string',
+                  description: 'Optional category filter',
+                  enum: Object.values(MEMORY_CATEGORIES)
+                }
+              },
+              required: ['memory_id']
+            }
+          } as Tool,
+          {
+            name: 'get_embedding_stats',
+            description: 'Get statistics about stored embeddings and semantic search status',
             inputSchema: {
               type: 'object',
               properties: {},
@@ -351,6 +465,163 @@ class MemoryServer {
                 text: `Memory Statistics:\n\nTotal Memories: ${totalMemories}\nCategories: ${categories.length}\n\nBreakdown by Category:\n${statsText}\n\nAvailable Categories: ${categories.join(', ')}`
               }]
             };
+          }
+
+          case 'semantic_search_memory': {
+            try {
+              const results = await this.memoryService.semanticSearch(args.query as string, {
+                limit: (args.limit as number) || 5,
+                minSimilarity: (args.min_similarity as number) || 0.7,
+                category: args.category as string | undefined
+              });
+
+              if (results.length === 0) {
+                return {
+                  content: [{
+                    type: 'text',
+                    text: `No semantically similar memories found for query: "${args.query}"`
+                  }]
+                };
+              }
+
+              const formattedResults = results.map((result: any) => 
+                `ID: ${result.memory.id}\nContent: ${result.memory.content}\nCategory: ${result.memory.category}\nSimilarity: ${result.similarity.toFixed(3)}\nUpdated: ${new Date(result.memory.updated_at).toISOString()}`
+              ).join('\n\n---\n\n');
+
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Found ${results.length} semantically similar memories:\n\n${formattedResults}`
+                }]
+              };
+            } catch (error) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Semantic search failed: ${(error as Error).message}`
+                }],
+                isError: true
+              };
+            }
+          }
+
+          case 'hybrid_search_memory': {
+            try {
+              const results = await this.memoryService.hybridSearch(args.query as string, {
+                limit: (args.limit as number) || 10,
+                category: args.category as string | undefined,
+                textWeight: (args.text_weight as number) || 0.3,
+                semanticWeight: (args.semantic_weight as number) || 0.7
+              });
+
+              if (results.length === 0) {
+                return {
+                  content: [{
+                    type: 'text',
+                    text: `No matching memories found for hybrid search: "${args.query}"`
+                  }]
+                };
+              }
+
+              const formattedResults = results.map((result: any) => 
+                `ID: ${result.memory.id}\nContent: ${result.memory.content}\nCategory: ${result.memory.category}\nCombined Score: ${result.combinedScore.toFixed(3)}\nSemantic: ${result.similarity.toFixed(3)} | Text: ${(result.textScore || 0).toFixed(3)}\nUpdated: ${new Date(result.memory.updated_at).toISOString()}`
+              ).join('\n\n---\n\n');
+
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Found ${results.length} matching memories (hybrid search):\n\n${formattedResults}`
+                }]
+              };
+            } catch (error) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Hybrid search failed: ${(error as Error).message}`
+                }],
+                isError: true
+              };
+            }
+          }
+
+          case 'find_similar_memories': {
+            try {
+              const results = await this.memoryService.findSimilarMemories(args.memory_id as string, {
+                limit: (args.limit as number) || 5,
+                minSimilarity: (args.min_similarity as number) || 0.7,
+                category: args.category as string | undefined
+              });
+
+              if (results.length === 0) {
+                return {
+                  content: [{
+                    type: 'text',
+                    text: `No similar memories found for memory ID: ${args.memory_id}`
+                  }]
+                };
+              }
+
+              const formattedResults = results.map((result: any) => 
+                `ID: ${result.memory.id}\nContent: ${result.memory.content}\nCategory: ${result.memory.category}\nSimilarity: ${result.similarity.toFixed(3)}\nUpdated: ${new Date(result.memory.updated_at).toISOString()}`
+              ).join('\n\n---\n\n');
+
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Found ${results.length} similar memories:\n\n${formattedResults}`
+                }]
+              };
+            } catch (error) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Finding similar memories failed: ${(error as Error).message}`
+                }],
+                isError: true
+              };
+            }
+          }
+
+          case 'get_embedding_stats': {
+            try {
+              const isEnabled = this.memoryService.isSemanticSearchEnabled();
+              const providerInfo = this.memoryService.getEmbeddingProviderInfo();
+              const embeddingStats = await this.memoryService.getEmbeddingStatistics();
+
+              let statsText = `Semantic Search: ${isEnabled ? 'Enabled' : 'Disabled'}\n\n`;
+
+              if (providerInfo) {
+                statsText += `Provider: ${providerInfo.name}\nDimensions: ${providerInfo.dimensions}\n\n`;
+              }
+
+              if (embeddingStats) {
+                statsText += `Total Embeddings: ${embeddingStats.totalEmbeddings}\n\n`;
+                
+                if (Object.keys(embeddingStats.providerStats).length > 0) {
+                  statsText += 'Provider Statistics:\n';
+                  Object.entries(embeddingStats.providerStats).forEach(([provider, stats]) => {
+                    statsText += `${provider}: ${stats.count} embeddings, models: ${stats.models.join(', ')}\n`;
+                  });
+                }
+              } else {
+                statsText += 'No embedding statistics available (semantic search disabled)';
+              }
+
+              return {
+                content: [{
+                  type: 'text',
+                  text: statsText
+                }]
+              };
+            } catch (error) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Failed to get embedding statistics: ${(error as Error).message}`
+                }],
+                isError: true
+              };
+            }
           }
 
           default:
